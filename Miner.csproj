@@ -1,0 +1,54 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>netcoreapp3.1</TargetFramework>
+    <RootNamespace>BSimClient</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Remove="appsettings.Development.json" />
+    <None Remove="appsettings.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="appsettings.Development.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="appsettings.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommandLineParser" Version="2.8.0" />
+    <PackageReference Include="System.Configuration.ConfigurationManager" Version="4.7.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Protobuf Include="..\Protos\Config.proto" GrpcServices="Client">
+      <Link>Protos\Config.proto</Link>
+    </Protobuf>
+    <Protobuf Include="..\Protos\GlobalKnowledge.proto" GrpcServices="Client">
+      <Link>Protos\GlobalKnowledge.proto</Link>
+    </Protobuf>
+    <Protobuf Include="..\Protos\Log.proto" GrpcServices="Client">
+      <Link>Protos\Log.proto</Link>
+    </Protobuf>
+    <Protobuf Include="..\Protos\greet.proto" GrpcServices="Server">
+      <Link>Protos\greet.proto</Link>
+    </Protobuf>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="ServiceClient\" />
+    <PackageReference Include="Google.Protobuf" Version="3.13.0" />
+    <PackageReference Include="Grpc.AspNetCore" Version="2.31.0" />
+    <PackageReference Include="Grpc.Net.ClientFactory" Version="2.31.0" />
+    <PackageReference Include="Grpc.Tools" Version="2.31.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+
+  </ItemGroup>
+
+</Project>
