@@ -43,8 +43,8 @@ namespace BSimClient
             };
             
             var cancellationToken = new CancellationToken();
-            var miner = new AltPowMiner(minerInfo, Application.Channel, cancellationToken);
-            miner.StartAsync();
+            MinerBase miner = new AltPowMiner(minerInfo, Application.Channel, cancellationToken);
+            miner.StartAsync().Wait();
         }
 
     }

@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "Miner": {
+      "commandName": "Project",
+      "commandLineArgs": "--name \"min\" --hash-power-factor 1.0"
+    }
+  }
+}

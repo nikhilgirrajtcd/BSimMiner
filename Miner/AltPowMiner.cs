@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -14,18 +15,19 @@ namespace BSimClient.Miner
         private readonly GrpcChannel grpcChannel;
         private readonly Config.ConfigClient configClient;
         private readonly Log.LogClient logClient;
+        private readonly GlobalKnowledge.GlobalKnowledgeClient globalKnowledgeClient;
         private long lastConfigRefreshTimestamp = 0;
         private readonly CancellationToken miningCancellationToken;
-        private static readonly DateTime epochTime = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-
+        
         private object miningParamsLock = new object();
         private MiningParams miningParams;
 
         public AltPowMiner(MinerInfo minerInfo, GrpcChannel grpcChannel, CancellationToken cancellationToken) : base(minerInfo)
         {
             this.grpcChannel = grpcChannel;
-            configClient = new Config.ConfigClient(grpcChannel);
-            logClient = new Log.LogClient(grpcChannel);
+            this.configClient = new Config.ConfigClient(grpcChannel);
+            this.logClient = new Log.LogClient(grpcChannel);
+            this.globalKnowledgeClient = new GlobalKnowledge.GlobalKnowledgeClient(grpcChannel);
             this.miningCancellationToken = cancellationToken;
         }
 
@@ -34,33 +36,60 @@ namespace BSimClient.Miner
             miningParams = await configClient.RegisterAsync(minerInfo);
         }
 
-        internal async void StartAsync()
+        public override async Task StartAsync()
         {
+            await RegisterOnNetworkAsync();
+
             await Task.Run(async () =>
             {
-                while (true)
-                {
-                    await RegisterOnNetworkAsync();
-
-                    CheckConfig();
-
-                    var timeTaken = GenerateProofOfWork(miningParams.RoundBlockChallengeSize);
-
-                    PostMiningUpdate(timeTaken);
-                }
+                MineAsync();
             }, miningCancellationToken);
         }
 
-        private void PostMiningUpdate(long timeTaken)
+        private async Task MineAsync()
         {
-            logClient.WriteAsync(new LogMessage
+            while (true)
+            {
+                CheckConfig(); // not awaited, the new config is updated in maximum 1 extra cycle
+                FindBestBlockToMineOn();
+                var stopwatch = Stopwatch.StartNew();
+                var pow = GenerateProofOfWork(miningParams.RoundBlockChallengeSize);
+                stopwatch.Stop();
+                var timeTaken = stopwatch.ElapsedMilliseconds;
+
+                PostMiningUpdate(timeTaken); 
+            }
+        }
+
+        private void FindBestBlockToMineOn()
+        {
+            var miningState = GetMiningUpdateAsync();
+        }
+
+        private async Task<BlockProgress> GetMiningUpdateAsync()
+        {
+            var gko = await globalKnowledgeClient.GetChainProgressAsync(new NothingGk());
+            var blockProgresses = gko.BlockProgress.ToList();
+            var bestBlock = blockProgresses.First(bp => bp.RoundBlockProgress == blockProgresses.Min(_ => _.RoundBlockProgress));
+            return bestBlock;
+            
+        }
+
+        private async void PostMiningUpdate(long timeTaken)
+        {
+            await globalKnowledgeClient.PutChainProgressAsync(new BlockProgressIn
+            {
+                // 
+            });
+
+            await logClient.WriteAsync(new LogMessage
             {
                 LogLevel = 2,
-                Message = $"Round block mined in \t{timeTaken} ms.",
+                Message = $"Round block mined in {timeTaken} ms.",
                 MinerId = minerInfo.MinerId,
                 Tag = "MiningUpdate",
-                Timestamp = (long) DateTime.UtcNow.Subtract(epochTime).TotalMilliseconds
-            }) ;
+                Timestamp = (long)DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalMilliseconds
+            });
         }
 
         /// <summary>
@@ -76,16 +105,17 @@ namespace BSimClient.Miner
             }
         }
 
-        protected override long GenerateProofOfWork(int challengeSize)
+        protected override byte[] GenerateProofOfWork(int challengeSize)
         {
-            var stopwatch = Stopwatch.StartNew();
             int challengeIndex = challengeSize / 8;
             int bitsToBeZeroAtChallengeIndex = challengeSize % 8;
             bool doItAgain = true;
+            byte[] pow;
 
-            while (doItAgain)
+            do
             {
-                var hash = hasher.ComputeHash(Guid.NewGuid().ToByteArray());
+                pow = Guid.NewGuid().ToByteArray();
+                var hash = hasher.ComputeHash(pow);
                 doItAgain = false;
 
                 int i = 0;
@@ -105,30 +135,29 @@ namespace BSimClient.Miner
                         doItAgain |= false;
                         break;
                     case 1:
-                        doItAgain |= !((hash[challengeIndex] & 0xFE) == 0);
+                        doItAgain |= !((hash[challengeIndex] & 0xFE) == hash[challengeIndex]);
                         break;
                     case 2:
-                        doItAgain |= !((hash[challengeIndex] & 0xFC) == 0);
+                        doItAgain |= !((hash[challengeIndex] & 0xFC) == hash[challengeIndex]);
                         break;
                     case 3:
-                        doItAgain |= !((hash[challengeIndex] & 0xF8) == 0);
+                        doItAgain |= !((hash[challengeIndex] & 0xF8) == hash[challengeIndex]);
                         break;
                     case 4:
-                        doItAgain |= !((hash[challengeIndex] & 0xF0) == 0);
+                        doItAgain |= !((hash[challengeIndex] & 0xF0) == hash[challengeIndex]);
                         break;
                     case 5:
-                        doItAgain |= !((hash[challengeIndex] & 0xE0) == 0);
+                        doItAgain |= !((hash[challengeIndex] & 0xE0) == hash[challengeIndex]);
                         break;
                     case 6:
-                        doItAgain |= !((hash[challengeIndex] & 0xC0) == 0);
+                        doItAgain |= !((hash[challengeIndex] & 0xC0) == hash[challengeIndex]);
                         break;
                     case 7:
-                        doItAgain |= !((hash[challengeIndex] & 0x80) == 0);
+                        doItAgain |= !((hash[challengeIndex] & 0x80) == hash[challengeIndex]);
                         break;
                 }
-            }
-            stopwatch.Stop();
-            return stopwatch.ElapsedMilliseconds;
+            } while (doItAgain);
+            return pow;
         }
     }
 }

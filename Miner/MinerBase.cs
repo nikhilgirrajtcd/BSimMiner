@@ -1,4 +1,5 @@
 ﻿using System.Security.Cryptography;
+using System.Threading.Tasks;
 
 using BchainSimServices;
 
@@ -15,6 +16,8 @@ namespace BSimClient.Miner
             this.hasher = SHA256.Create();
         }
 
-        protected abstract long GenerateProofOfWork(int challengeSize);
+        protected abstract byte[] GenerateProofOfWork(int challengeSize);
+
+        public abstract Task StartAsync();
     }
 }

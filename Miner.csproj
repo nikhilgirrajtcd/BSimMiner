@@ -9,10 +9,12 @@
   <ItemGroup>
     <None Remove="appsettings.Development.json" />
     <None Remove="appsettings.json" />
+    <None Remove="scripts\start.ps1" />
   </ItemGroup>
 
   <ItemGroup>
     <Content Include="appsettings.Development.json">
+      <DependentUpon>appsettings.json</DependentUpon>
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
     <Content Include="appsettings.json">
@@ -34,9 +36,9 @@
     <Protobuf Include="..\Protos\Log.proto" GrpcServices="Client">
       <Link>Protos\Log.proto</Link>
     </Protobuf>
-    <Protobuf Include="..\Protos\greet.proto" GrpcServices="Server">
-      <Link>Protos\greet.proto</Link>
-    </Protobuf>
+    <Content Include="scripts\start.ps1">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>
