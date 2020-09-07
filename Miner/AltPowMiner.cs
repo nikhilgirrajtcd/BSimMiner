@@ -6,6 +6,8 @@ using System.Threading.Tasks;
 
 using BchainSimServices;
 
+using BSimClient.Entities.Extensions;
+
 using Grpc.Net.Client;
 
 namespace BSimClient.Miner
@@ -18,9 +20,10 @@ namespace BSimClient.Miner
         private readonly GlobalKnowledge.GlobalKnowledgeClient globalKnowledgeClient;
         private long lastConfigRefreshTimestamp = 0;
         private readonly CancellationToken miningCancellationToken;
-        
+
         private object miningParamsLock = new object();
         private MiningParams miningParams;
+        private BlockProgress preferredBlock;
 
         public AltPowMiner(MinerInfo minerInfo, GrpcChannel grpcChannel, CancellationToken cancellationToken) : base(minerInfo)
         {
@@ -42,7 +45,7 @@ namespace BSimClient.Miner
 
             await Task.Run(async () =>
             {
-                MineAsync();
+                await MineAsync();
             }, miningCancellationToken);
         }
 
@@ -51,44 +54,91 @@ namespace BSimClient.Miner
             while (true)
             {
                 CheckConfig(); // not awaited, the new config is updated in maximum 1 extra cycle
-                FindBestBlockToMineOn();
+
+                // switch block if required and log
+                var blockThatMakesSense = await FindBestBlockToMineOnAsync();
+                if (!blockThatMakesSense.IsSameBlockAs(preferredBlock))
+                {
+                    PostBlockSwitchUpdate(preferredBlock, blockThatMakesSense);
+                }
+                preferredBlock = blockThatMakesSense; // the newer object has newer info, unconditionally update the local copy 
+
                 var stopwatch = Stopwatch.StartNew();
                 var pow = GenerateProofOfWork(miningParams.RoundBlockChallengeSize);
                 stopwatch.Stop();
-                var timeTaken = stopwatch.ElapsedMilliseconds;
 
-                PostMiningUpdate(timeTaken); 
+                var timeTaken = stopwatch.ElapsedMilliseconds;
+                PostMiningUpdate(pow, timeTaken);
             }
         }
 
-        private void FindBestBlockToMineOn()
-        {
-            var miningState = GetMiningUpdateAsync();
-        }
-
-        private async Task<BlockProgress> GetMiningUpdateAsync()
+        private async Task<BlockProgress> FindBestBlockToMineOnAsync()
         {
             var gko = await globalKnowledgeClient.GetChainProgressAsync(new NothingGk());
             var blockProgresses = gko.BlockProgress.ToList();
-            var bestBlock = blockProgresses.First(bp => bp.RoundBlockProgress == blockProgresses.Min(_ => _.RoundBlockProgress));
-            return bestBlock;
-            
+
+            // find min diff
+            BlockProgress bpWithMinDiff = null;
+            int minDiff = 0;
+            foreach (BlockProgress progress in blockProgresses)
+            {
+                var maxProgress = progress.MinerRoundBlockProgress.Max(lm => lm.Value);
+                int diff = 0;
+                if (progress.MinerRoundBlockProgress.TryGetValue(minerInfo.MinerId, out var selfProgress))
+                {
+                    diff = maxProgress - selfProgress;
+                }
+                else // self progress is zero
+                {
+                    diff = maxProgress;
+                }
+
+                if (minDiff > diff) // gets assigned to first block
+                {
+                    bpWithMinDiff = progress;
+                }
+            }
+
+            return bpWithMinDiff;
         }
 
-        private async void PostMiningUpdate(long timeTaken)
+        private async void PostMiningUpdate(byte[] pow, long timeTaken)
         {
+            string powString = Convert.ToBase64String(pow);
+#pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
+            PostUpdate($"Round block mined in {timeTaken} ms.", "MiningUpdate", 2, powString);
+#pragma warning restore CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
+
             await globalKnowledgeClient.PutChainProgressAsync(new BlockProgressIn
             {
-                // 
+                BlockIndex = preferredBlock.BlockIndex,
+                BlockOrdinal = preferredBlock.BlockOrdinal,
+                Pow = powString,
+                BlockProgress = preferredBlock.MinerRoundBlockProgress.ContainsKey(minerInfo.MinerId) ? preferredBlock.MinerRoundBlockProgress[minerInfo.MinerId] + 1 1,
+                TimeAtProgress = (long)DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalMilliseconds
             });
+        }
 
+        private async void PostBlockSwitchUpdate(BlockProgress old, BlockProgress neu)
+        {
+            string message = "Switching to a different block" +
+                $"{{ index {old.BlockIndex}->{neu.BlockIndex}, ordinal {old.BlockOrdinal}->{neu.BlockOrdinal}}}.";
+            string tag = "TacticalUpdate";
+            int logLevel = 2;
+
+            await PostUpdate(message, tag, logLevel);
+        }
+
+        private async Task PostUpdate(string message, string tag, int logLevel, string token = null)
+        {
             await logClient.WriteAsync(new LogMessage
             {
-                LogLevel = 2,
-                Message = $"Round block mined in {timeTaken} ms.",
+                LogLevel = logLevel,
+                Message = message,
+                Token = token,
                 MinerId = minerInfo.MinerId,
-                Tag = "MiningUpdate",
-                Timestamp = (long)DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalMilliseconds
+                Tag = tag,
+                Timestamp = (long)DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalMilliseconds,
             });
         }
 
