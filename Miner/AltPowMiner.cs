@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Diagnostics;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -9,6 +10,9 @@ using BchainSimServices;
 using BSimClient.Entities.Extensions;
 
 using Grpc.Net.Client;
+
+using Polly;
+using Polly.Retry;
 
 namespace BSimClient.Miner
 {
@@ -24,6 +28,7 @@ namespace BSimClient.Miner
         private object miningParamsLock = new object();
         private MiningParams miningParams;
         private BlockProgress preferredBlock;
+        private RetryPolicy<byte[]> MiningPolicy;
 
         public AltPowMiner(MinerInfo minerInfo, GrpcChannel grpcChannel, CancellationToken cancellationToken) : base(minerInfo)
         {
@@ -32,11 +37,13 @@ namespace BSimClient.Miner
             this.logClient = new Log.LogClient(grpcChannel);
             this.globalKnowledgeClient = new GlobalKnowledge.GlobalKnowledgeClient(grpcChannel);
             this.miningCancellationToken = cancellationToken;
+
         }
 
         public async Task RegisterOnNetworkAsync()
         {
             miningParams = await configClient.RegisterAsync(minerInfo);
+            SetMiningPolicy(miningParams);
         }
 
         public override async Task StartAsync()
@@ -72,17 +79,18 @@ namespace BSimClient.Miner
             }
         }
 
+        public readonly GetChainProgressIn getChainProgressIn = new GetChainProgressIn();
         private async Task<BlockProgress> FindBestBlockToMineOnAsync()
         {
-            var gko = await globalKnowledgeClient.GetChainProgressAsync(new NothingGk());
+            var gko = await globalKnowledgeClient.GetChainProgressAsync(getChainProgressIn);
             var blockProgresses = gko.BlockProgress.ToList();
 
             // find min diff
             BlockProgress bpWithMinDiff = null;
-            int minDiff = 0;
+            int minDiff = int.MaxValue;
             foreach (BlockProgress progress in blockProgresses)
             {
-                var maxProgress = progress.MinerRoundBlockProgress.Max(lm => lm.Value);
+                var maxProgress = progress.MinerRoundBlockProgress.Count > 0 ? progress.MinerRoundBlockProgress.Max(lm => lm.Value) : 0;
                 int diff = 0;
                 if (progress.MinerRoundBlockProgress.TryGetValue(minerInfo.MinerId, out var selfProgress))
                 {
@@ -95,6 +103,7 @@ namespace BSimClient.Miner
 
                 if (minDiff > diff) // gets assigned to first block
                 {
+                    minDiff = diff;
                     bpWithMinDiff = progress;
                 }
             }
@@ -114,7 +123,7 @@ namespace BSimClient.Miner
                 BlockIndex = preferredBlock.BlockIndex,
                 BlockOrdinal = preferredBlock.BlockOrdinal,
                 Pow = powString,
-                BlockProgress = preferredBlock.MinerRoundBlockProgress.ContainsKey(minerInfo.MinerId) ? preferredBlock.MinerRoundBlockProgress[minerInfo.MinerId] + 1 1,
+                BlockProgress = preferredBlock.MinerRoundBlockProgress.ContainsKey(minerInfo.MinerId) ? preferredBlock.MinerRoundBlockProgress[minerInfo.MinerId] + 1 : 1,
                 TimeAtProgress = (long)DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalMilliseconds
             });
         }
@@ -122,14 +131,14 @@ namespace BSimClient.Miner
         private async void PostBlockSwitchUpdate(BlockProgress old, BlockProgress neu)
         {
             string message = "Switching to a different block" +
-                $"{{ index {old.BlockIndex}->{neu.BlockIndex}, ordinal {old.BlockOrdinal}->{neu.BlockOrdinal}}}.";
+                $"{{ index {old?.BlockIndex}->{neu.BlockIndex}, ordinal {old?.BlockOrdinal}->{neu.BlockOrdinal}}}.";
             string tag = "TacticalUpdate";
             int logLevel = 2;
 
             await PostUpdate(message, tag, logLevel);
         }
 
-        private async Task PostUpdate(string message, string tag, int logLevel, string token = null)
+        private async Task PostUpdate(string message, string tag, int logLevel, string token = "")
         {
             await logClient.WriteAsync(new LogMessage
             {
@@ -151,63 +160,76 @@ namespace BSimClient.Miner
             if (ts - lastConfigRefreshTimestamp > 30000)
             {
                 lastConfigRefreshTimestamp = ts;
-                miningParams = await configClient.GetMiningParamsAsync(minerInfo);
+                var mp = await configClient.GetMiningParamsAsync(minerInfo);
+                if(mp.RoundBlockChallengeSize != miningParams?.RoundBlockChallengeSize)
+                    SetMiningPolicy(mp);
+                
+                miningParams = mp;
             }
+        }
+
+        private void SetMiningPolicy(MiningParams mp)
+        {
+            var sleepMillis = 100 / minerInfo.HashPower;
+            MiningPolicy = Policy
+                .HandleResult<byte[]>((bytes) => CheckProofOfWork(hasher, bytes, mp.RoundBlockChallengeSize) == false)
+                .WaitAndRetryForever((i) => TimeSpan.FromMilliseconds(sleepMillis));
         }
 
         protected override byte[] GenerateProofOfWork(int challengeSize)
         {
+            Func<byte[]> generator = () => Guid.NewGuid().ToByteArray(); // fairly random work
+            var pow = MiningPolicy.Execute(generator);
+            return pow;
+        }
+
+        private static bool CheckProofOfWork(HashAlgorithm hasher, byte[] pow, int challengeSize)
+        {
+            var hash = hasher.ComputeHash(pow);
             int challengeIndex = challengeSize / 8;
             int bitsToBeZeroAtChallengeIndex = challengeSize % 8;
-            bool doItAgain = true;
-            byte[] pow;
 
-            do
+            bool invalid = false;
+            int i = 0;
+            while (i < challengeIndex)
             {
-                pow = Guid.NewGuid().ToByteArray();
-                var hash = hasher.ComputeHash(pow);
-                doItAgain = false;
-
-                int i = 0;
-                while (i < challengeIndex)
+                if (hash[i] != 0x00)
                 {
-                    if (hash[i] != 0x00)
-                    {
-                        doItAgain = true;
-                        break;
-                    }
-                    i++;
+                    invalid = true;
+                    break;
                 }
+                i++;
+            }
 
-                switch (bitsToBeZeroAtChallengeIndex)
-                {
-                    case 0:
-                        doItAgain |= false;
-                        break;
-                    case 1:
-                        doItAgain |= !((hash[challengeIndex] & 0xFE) == hash[challengeIndex]);
-                        break;
-                    case 2:
-                        doItAgain |= !((hash[challengeIndex] & 0xFC) == hash[challengeIndex]);
-                        break;
-                    case 3:
-                        doItAgain |= !((hash[challengeIndex] & 0xF8) == hash[challengeIndex]);
-                        break;
-                    case 4:
-                        doItAgain |= !((hash[challengeIndex] & 0xF0) == hash[challengeIndex]);
-                        break;
-                    case 5:
-                        doItAgain |= !((hash[challengeIndex] & 0xE0) == hash[challengeIndex]);
-                        break;
-                    case 6:
-                        doItAgain |= !((hash[challengeIndex] & 0xC0) == hash[challengeIndex]);
-                        break;
-                    case 7:
-                        doItAgain |= !((hash[challengeIndex] & 0x80) == hash[challengeIndex]);
-                        break;
-                }
-            } while (doItAgain);
-            return pow;
+            switch (bitsToBeZeroAtChallengeIndex)
+            {
+                case 0:
+                    invalid |= false;
+                    break;
+                case 1:
+                    invalid |= ((hash[challengeIndex] & 0x80) != 0);
+                    break;
+                case 2:
+                    invalid |= ((hash[challengeIndex] & 0xC0) != 0);
+                    break;
+                case 3:
+                    invalid |= ((hash[challengeIndex] & 0xE0) != 0);
+                    break;
+                case 4:
+                    invalid |= ((hash[challengeIndex] & 0xF0) != 0);
+                    break;
+                case 5:
+                    invalid |= ((hash[challengeIndex] & 0xF8) != 0);
+                    break;
+                case 6:
+                    invalid |= ((hash[challengeIndex] & 0xFC) != 0);
+                    break;
+                case 7:
+                    invalid |= ((hash[challengeIndex] & 0xFE) != 0);
+                    break;
+            }
+
+            return !invalid;
         }
     }
 }

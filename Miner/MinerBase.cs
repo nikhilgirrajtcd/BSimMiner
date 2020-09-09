@@ -8,7 +8,7 @@ namespace BSimClient.Miner
     public abstract class MinerBase
     {
         protected readonly MinerInfo minerInfo;
-        protected readonly SHA256 hasher;
+        protected readonly HashAlgorithm hasher;
 
         protected MinerBase(MinerInfo minerInfo)
         {
