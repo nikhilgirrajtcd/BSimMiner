@@ -123,7 +123,8 @@ namespace BSimClient.Miner
                 BlockIndex = preferredBlock.BlockIndex,
                 BlockOrdinal = preferredBlock.BlockOrdinal,
                 Pow = powString,
-                BlockProgress = preferredBlock.MinerRoundBlockProgress.ContainsKey(minerInfo.MinerId) ? preferredBlock.MinerRoundBlockProgress[minerInfo.MinerId] + 1 : 1,
+                MinerId = minerInfo.MinerId,
+                Progress = preferredBlock.MinerRoundBlockProgress.ContainsKey(minerInfo.MinerId) ? preferredBlock.MinerRoundBlockProgress[minerInfo.MinerId] + 1 : 1,
                 TimeAtProgress = (long)DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalMilliseconds
             });
         }
@@ -183,7 +184,7 @@ namespace BSimClient.Miner
             return pow;
         }
 
-        private static bool CheckProofOfWork(HashAlgorithm hasher, byte[] pow, int challengeSize)
+        private static bool CheckProofOfWork(HashAlgorithm hasher, byte[] pow, int challengeSize) // 0000000101010101010101010000100111111
         {
             var hash = hasher.ComputeHash(pow);
             int challengeIndex = challengeSize / 8;
