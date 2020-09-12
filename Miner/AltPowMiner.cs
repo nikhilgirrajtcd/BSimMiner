@@ -60,7 +60,7 @@ namespace BSimClient.Miner
         {
             while (true)
             {
-                CheckConfig(); // not awaited, the new config is updated in maximum 1 extra cycle
+                await CheckConfig(); 
 
                 // switch block if required and log
                 var blockThatMakesSense = await FindBestBlockToMineOnAsync();
@@ -75,7 +75,7 @@ namespace BSimClient.Miner
                 stopwatch.Stop();
 
                 var timeTaken = stopwatch.ElapsedMilliseconds;
-                PostMiningUpdate(pow, timeTaken);
+                await PostMiningUpdate(pow, timeTaken);
             }
         }
 
@@ -83,7 +83,7 @@ namespace BSimClient.Miner
         private async Task<BlockProgress> FindBestBlockToMineOnAsync()
         {
             var gko = await globalKnowledgeClient.GetChainProgressAsync(getChainProgressIn);
-            var blockProgresses = gko.BlockProgress.ToList();
+            var blockProgresses = gko.BlockProgress.Where(block => !block.Stall).ToList();
 
             // find min diff
             BlockProgress bpWithMinDiff = null;
@@ -111,7 +111,7 @@ namespace BSimClient.Miner
             return bpWithMinDiff;
         }
 
-        private async void PostMiningUpdate(byte[] pow, long timeTaken)
+        private async Task PostMiningUpdate(byte[] pow, long timeTaken)
         {
             string powString = Convert.ToBase64String(pow);
 #pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
@@ -155,16 +155,16 @@ namespace BSimClient.Miner
         /// <summary>
         /// Check for config every 30 seconds
         /// </summary>
-        private async void CheckConfig()
+        private async Task CheckConfig()
         {
             var ts = Stopwatch.GetTimestamp();
             if (ts - lastConfigRefreshTimestamp > 30000)
             {
                 lastConfigRefreshTimestamp = ts;
                 var mp = await configClient.GetMiningParamsAsync(minerInfo);
-                if(mp.RoundBlockChallengeSize != miningParams?.RoundBlockChallengeSize)
+                if (mp.RoundBlockChallengeSize != miningParams?.RoundBlockChallengeSize)
                     SetMiningPolicy(mp);
-                
+
                 miningParams = mp;
             }
         }
